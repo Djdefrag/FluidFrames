@@ -9,7 +9,7 @@
     </a>
     <a href="https://store.steampowered.com/app/3228250/FluidFrames/">
         <button>
-             <img src="https://images.squarespace-cdn.com/content/v1/5b45fae8b98a78d9d80b9c5c/1531959264455-E7B8MJ3VMPX0593VGCZG/button-steam-available-fixed-2.png" width="250" height="70">
+             <img src="https://github.com/user-attachments/assets/999ecc17-0bf8-48f4-bf73-f14556cac42c" width="250" height="70">
         </button>                 
     </a>
 </div>
@@ -17,7 +17,6 @@
 <div align="center">
     <img src="https://github.com/user-attachments/assets/69522490-691c-4156-853f-6d17910d29e6"> </a> 
 </div>
-
 
 ## What is FluidFrames.RIFE?
 FluidFrames.RIFE is a Windows app powered by RIFE AI to create frame-generated and slowmotion videos.
@@ -104,7 +103,10 @@ Getting started.
 - [ ] 4.X version
     - [x] Hardware accelerated video encoding (nvenc / amf / qsv)
     - [x] More video extensions (.mp4 / .mkv / .avi / .mov)
-    - [x] Output resolution scaling
+    - [x] Choose output resolution scaling
+    - [x] Video AI multi-threading frame generation
+    - [x] Updated AI-engine (onnxruntime-directml)
+    - [x] Video frames extraction by FFMPEG (x10 times faster)
 
 
 ### Some Examples.
