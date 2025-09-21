@@ -15,7 +15,7 @@
 </div>
 <br>
 <div align="center">
-    <img src="[https://github.com/user-attachments/assets/69522490-691c-4156-853f-6d17910d29e6](https://github.com/user-attachments/assets/1d79cca3-b05e-4c58-862d-41bcfb764f42)"> </a> 
+    <img src="https://github.com/user-attachments/assets/c1d2361e-9c5f-4ae3-b92a-277866a2734b"> </a> 
 </div>
 
 ## What is FluidFrames.RIFE?
