@@ -9,11 +9,15 @@ from timeit     import default_timer as timer
 
 from typing    import Callable
 from threading import Thread
-from multiprocessing.pool import ThreadPool
+from queue     import Empty
+from itertools import repeat
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import ( 
     Process, 
-    Event          as multiprocessing_Event,
     Queue          as multiprocessing_Queue,
+    Event          as multiprocessing_Event,
+    Pool           as multiprocessing_Pool,
+    Manager        as multiprocessing_Manager,
     freeze_support as multiprocessing_freeze_support
 )
 
@@ -28,7 +32,6 @@ from os import (
     makedirs   as os_makedirs,
     listdir    as os_listdir,
     remove     as os_remove,
-    cpu_count  as os_cpu_count,
     fdopen     as os_fdopen,
     open       as os_open,
     rename     as os_rename,
@@ -46,9 +49,16 @@ from os.path import (
     expanduser as os_path_expanduser
 )
 
+from subprocess import (
+    Popen as subprocess_Popen,
+    STARTUPINFO,
+    STARTF_USESHOWWINDOW
+)
+
 # Third-party library imports
-from natsort     import natsorted
-from onnxruntime import InferenceSession
+from natsort import natsorted
+from psutil  import virtual_memory as psutil_virtual_memory
+from onnxruntime import InferenceSession as onnxruntime_InferenceSession
 
 from PIL.Image import (
     open      as pillow_image_open,
@@ -62,8 +72,7 @@ from cv2 import (
     CAP_PROP_FRAME_WIDTH,
     COLOR_BGR2RGB,
     IMREAD_UNCHANGED,
-    INTER_AREA,
-    INTER_CUBIC,
+    INTER_LINEAR,
     VideoCapture as opencv_VideoCapture,
     cvtColor     as opencv_cvtColor,
     imdecode     as opencv_imdecode,
@@ -73,15 +82,15 @@ from cv2 import (
 )
 
 from numpy import (
-    ndarray           as numpy_ndarray,
-    ascontiguousarray as numpy_ascontiguousarray,
-    frombuffer        as numpy_frombuffer,
-    concatenate       as numpy_concatenate, 
-    transpose         as numpy_transpose,
-    expand_dims       as numpy_expand_dims,
-    squeeze           as numpy_squeeze,
-    clip              as numpy_clip,
-    mean              as numpy_mean,
+    frombuffer    as numpy_frombuffer,
+    concatenate   as numpy_concatenate, 
+    transpose     as numpy_transpose,
+    expand_dims   as numpy_expand_dims,
+    squeeze       as numpy_squeeze,
+    clip          as numpy_clip,
+    mean          as numpy_mean,
+    array_split   as numpy_array_split,
+    ndarray       as numpy_ndarray,
     float32,
     uint8
 )
@@ -115,7 +124,7 @@ def find_by_relative_path(relative_path: str) -> str:
 
 
 app_name   = "FluidFrames"
-version    = "4.2"
+version    = "4.6"
 githubme   = "https://github.com/Djdefrag/FluidFrames/releases"
 telegramme = "https://linktr.ee/j3ngystudio"
 
@@ -127,10 +136,11 @@ text_color              = "#B8B8B8"
 
 MENU_LIST_SEPARATOR     = [ "----" ]
 AI_models_list          = [ "RIFE", "RIFE_Lite" ]
+AI_multithreading_list  = [ "OFF", "2 threads", "4 threads", "6 threads", "8 threads"]
 generation_options_list = [ "x2", "x4", "x8", "Slowmotion x2", "Slowmotion x4", "Slowmotion x8" ]
 gpus_list               = [ "Auto", "GPU 1", "GPU 2", "GPU 3", "GPU 4" ]
 keep_frames_list        = [ "ON", "OFF"]
-image_extension_list    = [ ".png", ".jpg", ".bmp", ".tiff" ]
+image_extension_list    = [ ".jpg", ".png", ".bmp", ".tiff" ]
 video_extension_list    = [ ".mp4", ".mkv", ".avi", ".mov" ]
 video_codec_list   = [ 
     "x264",       "x265",       MENU_LIST_SEPARATOR[0],
@@ -145,8 +155,7 @@ USER_PREFERENCE_PATH = find_by_relative_path(f"{DOCUMENT_PATH}{os_separator}{app
 FFMPEG_EXE_PATH      = find_by_relative_path(f"Assets{os_separator}ffmpeg.exe")
 EXIFTOOL_EXE_PATH    = find_by_relative_path(f"Assets{os_separator}exiftool.exe")
 
-ECTRACTION_FRAMES_FOR_CPU = 30
-MULTIPLE_FRAMES_TO_SAVE   = 8
+FRAMES_TO_SAVE_BATCH = 16
 
 COMPLETED_STATUS = "Completed"
 ERROR_STATUS     = "Error"
@@ -199,6 +208,123 @@ supported_video_extensions = [
 
 # AI -------------------
 
+class SingleFrameSequence:
+
+    def __init__(
+            self, 
+            start_frame_path: str, 
+            end_frame_path: str,
+            to_generate_frames_paths: list[str]
+        ):
+
+        self.start_frame_path          = start_frame_path
+        self.end_frame_path            = end_frame_path
+        self.to_generate_frames_paths  = to_generate_frames_paths
+        self.frames_to_generate_number = len(self.to_generate_frames_paths)
+
+
+    # EXTERNAL FUNCTIONS
+
+    def _get_ordered_single_frame_sequence(self) -> list[str]:
+        ordered_frame_sequence = []
+        ordered_frame_sequence.append(self.start_frame_path)
+        ordered_frame_sequence.extend(self.to_generate_frames_paths)
+        ordered_frame_sequence.append(self.end_frame_path)
+        return ordered_frame_sequence
+    
+    def _is_sequence_already_generated(self) -> bool:
+        already_generated_counter = len([path for path in self.to_generate_frames_paths if os_path_exists(path)])
+        if already_generated_counter == self.frames_to_generate_number:
+            return True
+        else:
+            return False
+
+class CompleteFrameSequence:
+
+    def __init__(
+            self, 
+            frame_sequence_list: list[SingleFrameSequence],
+            input_resize_factor:  int,
+            output_resize_factor: int
+            ):
+        
+        self.frame_sequence_list           = frame_sequence_list
+        self.total_togenerate_frames_count = self._get_total_togenerate_frames_count()
+        self.input_resize_factor           = input_resize_factor
+        self.output_resize_factor          = output_resize_factor
+        
+        self.AI_input_height = None
+        self.AI_input_width = None
+        self.target_height = None
+        self.target_width = None
+
+        self._calculate_input_output_resolution()
+
+        print(f"[Complete frame sequence created]")
+        print(f"   number of single frame sequence: {len(self.frame_sequence_list)}")
+        print(f"   number of frames to generate: {self.total_togenerate_frames_count}")
+        print(f"   AI input resolution: {self.AI_input_width}x{self.AI_input_height}")
+        print(f"   output resolution: {self.target_width}x{self.target_height}")
+
+
+
+    def _get_total_togenerate_frames_count(self) -> int:
+        return sum(single_sequence.frames_to_generate_number for single_sequence in self.frame_sequence_list)
+
+    def _get_image_resolution(self, image: numpy_ndarray) -> tuple:
+        height = image.shape[0]
+        width  = image.shape[1]
+
+        return height, width 
+
+    def _calculate_input_output_resolution(self):
+        first_frame = image_read(self.frame_sequence_list[0].start_frame_path)
+        
+        original_height, original_width = self._get_image_resolution(first_frame)
+
+        # AI input resolution
+        self.AI_input_width  = int(original_width * self.input_resize_factor)
+        self.AI_input_height = int(original_height * self.input_resize_factor)
+
+        self.AI_input_width  = self.AI_input_width if self.AI_input_width % 2 == 0 else self.AI_input_width + 1
+        self.AI_input_height = self.AI_input_height if self.AI_input_height % 2 == 0 else self.AI_input_height + 1
+
+        # Frame sequence target resolution
+        self.target_width  = int(self.AI_input_width * self.output_resize_factor)
+        self.target_height = int(self.AI_input_height * self.output_resize_factor)
+
+        self.target_width  = self.target_width if self.target_width % 2 == 0 else self.target_width + 1
+        self.target_height = self.target_height if self.target_height % 2 == 0 else self.target_height + 1
+
+
+    # EXTERNAL FUNCTIONS
+
+    def get_only_sequence_pairs_to_generate(self) -> list[SingleFrameSequence]:
+        only_sequence_to_generate = []
+        for sequence in self.frame_sequence_list:
+            if not sequence._is_sequence_already_generated():
+                only_sequence_to_generate.append(sequence)
+
+        return only_sequence_to_generate
+
+    def _get_ordered_frame_sequence(self) -> list[str]:
+        ordered_frame_sequence = []
+
+        for frame_sequence in self.frame_sequence_list:
+            ordered_frame_sequence.extend(frame_sequence._get_ordered_single_frame_sequence())
+
+        ordered_frame_sequence = list(dict.fromkeys(ordered_frame_sequence))
+
+        return ordered_frame_sequence
+    
+    def _calculate_already_generated_frames(self) -> int:
+        counter = 0
+        for frame_sequence in self.frame_sequence_list:
+            counter += len([path for path in frame_sequence.to_generate_frames_paths if os_path_exists(path)])
+
+        return counter
+
+
 class AI_interpolation:
 
     # CLASS INIT FUNCTIONS
@@ -208,22 +334,22 @@ class AI_interpolation:
             AI_model_name: str, 
             frame_gen_factor: int,
             directml_gpu: str, 
-            input_resize_factor: int,
-            output_resize_factor: int,
-            ):
+            AI_input_height: int,
+            AI_input_width: int
+        ):
         
         # Passed variables
-        self.AI_model_name        = AI_model_name
-        self.frame_gen_factor     = frame_gen_factor
-        self.directml_gpu         = directml_gpu
-        self.input_resize_factor  = input_resize_factor
-        self.output_resize_factor = output_resize_factor
+        self.AI_model_name    = AI_model_name
+        self.frame_gen_factor = frame_gen_factor
+        self.directml_gpu     = directml_gpu
+        self.AI_input_height  = AI_input_height
+        self.AI_input_width   = AI_input_width
 
         # Calculated variables
         self.AI_model_path    = find_by_relative_path(f"AI-onnx{os_separator}{self.AI_model_name}_fp32.onnx")
         self.inferenceSession = self._load_inferenceSession()
 
-    def _load_inferenceSession(self) -> InferenceSession:
+    def _load_inferenceSession(self) -> onnxruntime_InferenceSession:
         
         providers = ['DmlExecutionProvider']
 
@@ -234,11 +360,11 @@ class AI_interpolation:
             case 'GPU 3':       provider_options = [{"device_id": "2"}]
             case 'GPU 4':       provider_options = [{"device_id": "3"}]
 
-        inference_session = InferenceSession(
+        inference_session = onnxruntime_InferenceSession(
             path_or_bytes    = self.AI_model_path, 
             providers        = providers,
             provider_options = provider_options
-            )
+        )
 
         return inference_session
 
@@ -261,39 +387,9 @@ class AI_interpolation:
 
         return height, width 
 
-    def resize_with_input_factor(self, image: numpy_ndarray) -> numpy_ndarray:
-        
-        old_height, old_width = self.get_image_resolution(image)
+    def resize_with_AI_input_resolution(self, image: numpy_ndarray) -> numpy_ndarray:
+        return opencv_resize(image, (self.AI_input_width, self.AI_input_height), interpolation = INTER_LINEAR)
 
-        new_width  = int(old_width * self.input_resize_factor)
-        new_height = int(old_height * self.input_resize_factor)
-
-        new_width  = new_width if new_width % 2 == 0 else new_width + 1
-        new_height = new_height if new_height % 2 == 0 else new_height + 1
-
-        if self.input_resize_factor > 1:
-            return opencv_resize(image, (new_width, new_height), interpolation = INTER_CUBIC)
-        elif self.input_resize_factor < 1:
-            return opencv_resize(image, (new_width, new_height), interpolation = INTER_AREA)
-        else:
-            return image
-
-    def resize_with_output_factor(self, image: numpy_ndarray) -> numpy_ndarray:
-        
-        old_height, old_width = self.get_image_resolution(image)
-
-        new_width  = int(old_width * self.output_resize_factor)
-        new_height = int(old_height * self.output_resize_factor)
-
-        new_width  = new_width if new_width % 2 == 0 else new_width + 1
-        new_height = new_height if new_height % 2 == 0 else new_height + 1
-
-        if self.output_resize_factor > 1:
-            return opencv_resize(image, (new_width, new_height), interpolation = INTER_CUBIC)
-        elif self.output_resize_factor < 1:
-            return opencv_resize(image, (new_width, new_height), interpolation = INTER_AREA)
-        else:
-            return image
 
 
 
@@ -311,14 +407,6 @@ class AI_interpolation:
         return image
 
     def onnxruntime_inference(self, image: numpy_ndarray) -> numpy_ndarray:
-
-        # IO BINDING
-        
-        # io_binding = self.inferenceSession.io_binding()
-        # io_binding.bind_cpu_input(self.inferenceSession.get_inputs()[0].name, image)
-        # io_binding.bind_output(self.inferenceSession.get_outputs()[0].name, element_type = float32)
-        # self.inferenceSession.run_with_iobinding(io_binding)
-        # onnx_output = io_binding.copy_outputs_to_cpu()[0]
 
         onnx_input  = {self.inferenceSession.get_inputs()[0].name: image}
         onnx_output = self.inferenceSession.run(None, onnx_input)[0]
@@ -353,7 +441,10 @@ class AI_interpolation:
     def AI_orchestration(self, image1: numpy_ndarray, image2: numpy_ndarray) -> list[numpy_ndarray]:
 
         generated_images = []
-        
+
+        image1 = self.resize_with_AI_input_resolution(image1)
+        image2 = self.resize_with_AI_input_resolution(image2)
+
         if self.frame_gen_factor == 2:   # Generate 1 image [image1 / image_A / image2]
             image_A = self.AI_interpolation(image1, image2)
             generated_images.append(image_A)
@@ -954,56 +1045,27 @@ def create_active_button(
 # File Utils functions ------------------------
 
 def create_dir(name_dir: str) -> None:
-    if os_path_exists(name_dir): remove_directory(name_dir)
+    if os_path_exists(name_dir):     remove_directory(name_dir)
     if not os_path_exists(name_dir): os_makedirs(name_dir, mode=0o777)
+
+    if sys.platform == "win32":
+        try:
+            # Exclude from Windows indexing
+            subprocess_run(
+                ["attrib", "+I", "/S", "/D", name_dir], 
+                check = False, 
+                shell = True
+            )
+
+        except Exception as e:
+            print(f"[create_dir] Warning: unable to disable indexing for {name_dir}: {e}")
 
 def image_read(file_path: str) -> numpy_ndarray: 
     with open(file_path, 'rb') as file:
-        return opencv_imdecode(numpy_ascontiguousarray(numpy_frombuffer(file.read(), uint8)), IMREAD_UNCHANGED)
+        return opencv_imdecode(numpy_frombuffer(file.read(), uint8), IMREAD_UNCHANGED)
 
 def image_write(file_path: str, file_data: numpy_ndarray, file_extension: str = ".jpg") -> None: 
     opencv_imencode(file_extension, file_data)[1].tofile(file_path)
-
-def prepare_output_video_frame_filenames(
-        extracted_frames_paths: list[str],
-        selected_AI_model: str,
-        frame_gen_factor: int,
-        selected_image_extension: str,
-        ) -> list[str]:
-
-    total_frames_paths = []
-    how_many_frames    = len(extracted_frames_paths)
-
-    for index in range(how_many_frames - 1):
-        frame_path             = extracted_frames_paths[index]
-        base_path              = os_path_splitext(frame_path)[0]
-        generated_frames_paths = prepare_generated_frames_paths(base_path, selected_AI_model, selected_image_extension, frame_gen_factor)
-
-        total_frames_paths.append(frame_path)
-        total_frames_paths.extend(generated_frames_paths)
-
-    total_frames_paths.append(extracted_frames_paths[-1])
-
-    return total_frames_paths
-
-def prepare_output_video_frame_to_generate_filenames(
-        extracted_frames_paths: list[str],
-        selected_AI_model: str,
-        frame_gen_factor: int,
-        selected_image_extension: str,
-        ) -> list[str]:
-
-    only_generated_frames_paths = []
-    how_many_frames             = len(extracted_frames_paths)
-
-    for index in range(how_many_frames - 1):
-        frame_path             = extracted_frames_paths[index]
-        base_path              = os_path_splitext(frame_path)[0]
-        generated_frames_paths = prepare_generated_frames_paths(base_path, selected_AI_model, selected_image_extension, frame_gen_factor)
-
-        only_generated_frames_paths.extend(generated_frames_paths)
-
-    return only_generated_frames_paths
 
 def prepare_output_video_filename(
         video_path: str, 
@@ -1088,65 +1150,6 @@ def get_video_fps(video_path: str) -> float:
     frame_rate    = video_capture.get(CAP_PROP_FPS)
     video_capture.release()
     return frame_rate
-
-def save_extracted_frames(
-        extracted_frames_paths: list[str], 
-        extracted_frames: list[numpy_ndarray], 
-        cpu_number: int
-        ) -> None:
-    
-    with ThreadPool(cpu_number) as pool: pool.starmap(image_write, zip(extracted_frames_paths, extracted_frames))
-
-def extract_video_frames(
-        process_status_q: multiprocessing_Queue,
-        file_number: int,
-        target_directory: str,
-        AI_instance: AI_interpolation,
-        video_path: str, 
-        cpu_number: int,
-        selected_image_extension: str
-    ) -> list[str]:
-
-    create_dir(target_directory)
-
-    # Video frame extraction
-    frames_number_to_save = cpu_number * ECTRACTION_FRAMES_FOR_CPU
-    video_capture         = opencv_VideoCapture(video_path)
-    frame_count           = int(video_capture.get(CAP_PROP_FRAME_COUNT))
-
-    extracted_frames       = []
-    extracted_frames_paths = []
-    video_frames_list      = []
-
-    frame_index = 0
-
-    for frame_number in range(frame_count):
-        success, frame = video_capture.read()
-        if not success: break
-
-        frame_path = f"{target_directory}{os_separator}frame_{frame_number:03d}{selected_image_extension}"  
-        frame      = AI_instance.resize_with_input_factor(frame)
-
-        extracted_frames.append(frame)
-        extracted_frames_paths.append(frame_path)
-        video_frames_list.append(frame_path)
-
-        if len(extracted_frames) == frames_number_to_save:
-            percentage_extraction = (frame_number / frame_count) * 100
-
-            write_process_status(process_status_q, f"{file_number}. Extracting video frames ({round(percentage_extraction, 2)}%)")
-            save_extracted_frames(extracted_frames_paths, extracted_frames, cpu_number)
-            extracted_frames       = []
-            extracted_frames_paths = []
-
-        frame_index += 1
-
-    video_capture.release()
-
-    if len(extracted_frames) > 0: 
-        save_extracted_frames(extracted_frames_paths, extracted_frames, cpu_number)
-    
-    return video_frames_list
 
 def video_encoding(
         process_status_q: multiprocessing_Queue,
@@ -1342,71 +1345,71 @@ def copy_file_metadata(
 
 # Core functions ------------------------
 
-def stop_thread() -> None:
-    stop = 1 + "x"
-
 def check_frame_generation_steps() -> None:
     sleep(1)
 
-    try:
-        while True:
-            actual_step = read_process_status()
+    while True:
+        actual_step = process_status_q.get()
+        print(f"[{app_name}] check_frame_generation_steps - {actual_step}")
 
-            if actual_step == COMPLETED_STATUS:
-                info_message.set(f"All files completed! :)")
-                stop_generation_process()
-                stop_thread()
+        if actual_step == COMPLETED_STATUS:
+            info_message.set(f"All files completed! :)")
+            stop_framegeneration_process()
+            place_generation_button()
+            break
 
-            elif actual_step == STOP_STATUS:
-                info_message.set(f"Frame generation stopped")
-                stop_generation_process()
-                stop_thread()
+        elif actual_step == STOP_STATUS:
+            info_message.set(f"Frame generation stopped")
+            stop_framegeneration_process()
+            place_generation_button()
+            break
 
-            elif ERROR_STATUS in actual_step:
-                error_message = f"Error while generating :("
-                error = actual_step.replace(ERROR_STATUS, "")
-                info_message.set(error_message)
-                show_error_message(error)
-                stop_thread()
+        elif ERROR_STATUS in actual_step:
+            error_message = f"Error while generating :("
+            error = actual_step.replace(ERROR_STATUS, "")
+            info_message.set(error_message)
+            show_error_message(error)
+            place_generation_button()
+            break
 
-            else:
-                info_message.set(actual_step)
+        else:
+            info_message.set(actual_step)
 
-            sleep(1)
-    except:
-        place_generation_button()
+        sleep(1)
 
-def read_process_status() -> None:
-    return process_status_q.get()
-
-def write_process_status(
-        process_status_q: multiprocessing_Queue,
-        step: str
-        ) -> None:
-    
-    print(f"{step}")
+def write_process_status(process_status_q: multiprocessing_Queue, step: str) -> None:
     while not process_status_q.empty(): process_status_q.get()
     process_status_q.put(f"{step}")
 
-def stop_generation_process() -> None:
+def stop_framegeneration_process() -> None:
     global process_frame_generation_orchestrator
+
+    print(f"[{app_name}] stop_framegeneration_process - framegeneration process stop event")
+    event_stop_framegeneration_process.set()
+    print(f"[{app_name}] stop_framegeneration_process - framegeneration process stop event setted")
+
+    sleep(1)
 
     try:
         process_frame_generation_orchestrator
     except:
         pass
     else:
-        process_frame_generation_orchestrator.terminate()
-        process_frame_generation_orchestrator.join()
+        print(f"[{app_name}] stop_framegeneration_process - waiting for framegeneration orchestrator to terminate")
+        process_frame_generation_orchestrator.kill()
+        print(f"[{app_name}] stop_framegeneration_process - framegeneration orchestrator terminated")
 
 def stop_button_command() -> None:
-    stop_generation_process()
+    stop_framegeneration_process()
     write_process_status(process_status_q, f"{STOP_STATUS}")
+
+# ORCHESTRATOR
 
 def generate_button_command() -> None: 
     global selected_file_list
     global selected_AI_model
     global selected_generation_option
+    global selected_AI_multithreading
     global selected_gpu
     global selected_image_extension
     global selected_video_extension
@@ -1420,65 +1423,67 @@ def generate_button_command() -> None:
     if user_input_checks():
         info_message.set("Loading")
 
-        cpu_number = int(os_cpu_count()/2)
-
         print("=" * 50)
         print(f"> Starting frame generation:")
-        print(f"   Files to process: {len(selected_file_list)}")
-        print(f"   Output path: {(selected_output_path.get())}")
-        print(f"   Selected AI model: {selected_AI_model}")
-        print(f"   Selected frame generation option: {selected_generation_option}")
-        print(f"   Selected image output extension: {selected_image_extension}")
-        print(f"   Selected video output extension: {selected_video_extension}")
-        print(f"   Selected video output codec: {selected_video_codec}")
-        print(f"   Input resize factor: {int(input_resize_factor * 100)}%")
-        print(f"   Output resize factor: {int(output_resize_factor * 100)}%")
-        print(f"   Cpu number: {cpu_number}")
-        print(f"   Save frames: {selected_keep_frames}")
+        print(f"    Files to process: {len(selected_file_list)}")
+        print(f"    Output path: {(selected_output_path.get())}")
+        print(f"    Selected AI model: {selected_AI_model}")
+        print(f"    Selected frame generation option: {selected_generation_option}")
+        print(f"    AI multithreading: {selected_AI_multithreading}")
+        print(f"    Selected image output extension: {selected_image_extension}")
+        print(f"    Selected video output extension: {selected_video_extension}")
+        print(f"    Selected video output codec: {selected_video_codec}")
+        print(f"    Input resize factor: {int(input_resize_factor * 100)}%")
+        print(f"    Output resize factor: {int(output_resize_factor * 100)}%")
+        print(f"    Save frames: {selected_keep_frames}")
         print("=" * 50)
 
         place_stop_button()
+        event_stop_framegeneration_process.clear()
+        while not process_status_q.empty():        process_status_q.get_nowait()
+        while not video_frames_and_info_q.empty(): video_frames_and_info_q.get_nowait()
 
         process_frame_generation_orchestrator = Process(
             target = frame_generation_orchestrator,
             args = (
                 process_status_q, 
+                video_frames_and_info_q,
+                event_stop_framegeneration_process,
                 selected_file_list, 
                 selected_output_path.get(),
                 selected_AI_model,
-                selected_gpu,
+                selected_AI_multithreading,
                 selected_generation_option, 
+                input_resize_factor,
+                output_resize_factor,
+                selected_gpu,
+                selected_keep_frames,
                 selected_image_extension, 
                 selected_video_extension, 
                 selected_video_codec,
-                input_resize_factor,
-                output_resize_factor, 
-                cpu_number, 
-                selected_keep_frames
             )
         )
         process_frame_generation_orchestrator.start()
 
-        thread_wait = Thread(target = check_frame_generation_steps)
-        thread_wait.start()
-
-
-# ORCHESTRATOR
+        Thread(target = check_frame_generation_steps).start()
 
 def frame_generation_orchestrator(
-        process_status_q: multiprocessing_Queue,
-        selected_file_list: list,
-        selected_output_path: str,
-        selected_AI_model: str,
-        selected_gpu: str,
+        process_status_q:                   multiprocessing_Queue,
+        video_frames_and_info_q:            multiprocessing_Queue,
+        event_stop_framegeneration_process: multiprocessing_Event,
+
+        selected_file_list:         list[str],
+        selected_output_path:       str,
+        selected_AI_model:          str,
+        selected_AI_multithreading: int,
         selected_generation_option: str,
-        selected_image_extension: str,
-        selected_video_extension: str,
-        selected_video_codec: str,
-        input_resize_factor: int,
-        output_resize_factor: int,
-        cpu_number: int,
-        selected_keep_frames: bool
+        input_resize_factor:        int,
+        output_resize_factor:       int,
+        selected_gpu:               str,
+        selected_keep_frames:       bool,
+        selected_image_extension:   str,
+        selected_video_extension:   str,
+        selected_video_codec:       str,
         ) -> None:
          
     frame_gen_factor, slowmotion = check_frame_generation_option(selected_generation_option)
@@ -1486,28 +1491,28 @@ def frame_generation_orchestrator(
 
     try:
         write_process_status(process_status_q, f"Loading AI model")
-        AI_instance = AI_interpolation(selected_AI_model, frame_gen_factor, selected_gpu, input_resize_factor, output_resize_factor)
-
         for file_number in range(how_many_files):
             file_path   = selected_file_list[file_number]
             file_number = file_number + 1
 
             video_frame_generation(
-                process_status_q,
-                file_path, 
-                file_number,
-                selected_output_path,
-                AI_instance,
-                selected_AI_model,
-                frame_gen_factor, 
-                slowmotion,
-                selected_image_extension, 
-                selected_video_extension,
-                selected_video_codec,
-                input_resize_factor,
-                output_resize_factor,
-                cpu_number,
-                selected_keep_frames
+                process_status_q                   = process_status_q,
+                video_frames_and_info_q            = video_frames_and_info_q,
+                event_stop_framegeneration_process = event_stop_framegeneration_process,
+                video_path                         = file_path, 
+                file_number                        = file_number,
+                selected_output_path               = selected_output_path,
+                selected_AI_model                  = selected_AI_model,
+                frame_gen_factor                   = frame_gen_factor,
+                selected_AI_multithreading         = selected_AI_multithreading, 
+                selected_gpu                       = selected_gpu,
+                slowmotion                         = slowmotion,
+                input_resize_factor                = input_resize_factor,
+                output_resize_factor               = output_resize_factor,
+                selected_keep_frames               = selected_keep_frames,
+                selected_image_extension           = selected_image_extension, 
+                selected_video_extension           = selected_video_extension,
+                selected_video_codec               = selected_video_codec,
             )
 
         write_process_status(process_status_q, f"{COMPLETED_STATUS}")
@@ -1515,206 +1520,417 @@ def frame_generation_orchestrator(
     except Exception as exception:
         write_process_status(process_status_q, f"{ERROR_STATUS} {str(exception)}")
 
+
+
 # FRAME GENERATION
 
+def generate_video_frames_async(
+        video_frames_and_info_q:    multiprocessing_Queue,
+        event_stop_upscale_process: multiprocessing_Event,
+        frame_sequence_pair_list:   list[SingleFrameSequence], 
+        selected_AI_model:          str,
+        frame_gen_factor:           int, 
+        selected_AI_multithreading: int,
+        selected_gpu:               str,
+        AI_input_height:            int,
+        AI_input_width:             int,
+        ):
+    
+    # MAIN
+    
+    AI_instance = AI_interpolation(selected_AI_model, frame_gen_factor, selected_gpu, AI_input_height, AI_input_width)
+    
+    for frame_sequence_pair in frame_sequence_pair_list:
+
+        if event_stop_upscale_process.is_set():
+            print("[Frame generation process] Terminating early due to stop event")
+            break
+        
+        start_timer = timer()
+
+        # Read frames
+        frame_1 = image_read(frame_sequence_pair.start_frame_path)
+        frame_2 = image_read(frame_sequence_pair.end_frame_path)
+        
+        # Generate frames
+        generated_frames = AI_instance.AI_orchestration(frame_1, frame_2)
+
+        # Calculate processing time
+        end_timer       = timer()
+        processing_time = (end_timer - start_timer)/selected_AI_multithreading
+        
+        # Save frames in queue
+        video_frames_and_info_q.put(
+            {
+                "frame_1_path":           frame_sequence_pair.start_frame_path,
+                "frame_1":                frame_1,
+                "generated_frames_paths": frame_sequence_pair.to_generate_frames_paths,
+                "generated_frames":       generated_frames,
+                "processing_time":        processing_time
+            }
+        )
+
 def video_frame_generation(
-        process_status_q:         multiprocessing_Queue,
-        video_path:               str, 
-        file_number:              int,
-        selected_output_path:     str,
-        AI_instance:              AI_interpolation,
-        selected_AI_model:        str,
-        frame_gen_factor:         int, 
-        slowmotion:               bool, 
-        selected_image_extension: str,
-        selected_video_extension: str,
-        selected_video_codec:     str,
-        input_resize_factor:      int,
-        output_resize_factor:     int,
-        cpu_number:               int, 
-        selected_keep_frames:     bool
+        process_status_q:                   multiprocessing_Queue,
+        video_frames_and_info_q:            multiprocessing_Queue,
+        event_stop_framegeneration_process: multiprocessing_Event,
+
+        video_path:                 str, 
+        file_number:                int,
+        selected_output_path:       str,
+        selected_AI_model:          str,
+        frame_gen_factor:           int, 
+        selected_AI_multithreading: int,
+        selected_gpu:               str,
+        slowmotion:                 bool, 
+        input_resize_factor:        int,
+        output_resize_factor:       int,
+        selected_keep_frames:       bool,
+        selected_image_extension:   str,
+        selected_video_extension:   str,
+        selected_video_codec:       str,
         ) -> None:
     
     
     # Internal functions
 
+    def prepare_frame_sequence_pair_list(
+            extracted_frames_paths: list[str],
+            selected_AI_model: str,
+            frame_gen_factor: int,
+            selected_image_extension: str,
+        ) -> list[SingleFrameSequence]:
+
+        frame_sequence_pair_list: list[SingleFrameSequence] = []
+
+        for index in range(len(extracted_frames_paths)-1):
+            start_frame_path         = extracted_frames_paths[index]
+            end_frame_path           = extracted_frames_paths[index+1]
+            base_path                = os_path_splitext(start_frame_path)[0]
+            to_generate_frames_paths = prepare_generated_frames_paths(base_path, selected_AI_model, selected_image_extension, frame_gen_factor)
+
+            frame_sequence_pair = SingleFrameSequence(start_frame_path, end_frame_path, to_generate_frames_paths)
+
+            frame_sequence_pair_list.append(frame_sequence_pair)
+
+        return frame_sequence_pair_list
+
+    def monitor_extraction_progress(
+            process_status_q:      multiprocessing_Queue,
+            stop_extraction_event: multiprocessing_Event,
+            file_number:           int,
+            target_directory:      str,
+            total_video_frames:    int,
+        ):
+
+        while not stop_extraction_event.is_set():
+            sleep(1)
+            extracted_frames_number = len(
+                [
+                    f for f in os_listdir(target_directory)
+                    if f.startswith("frame_")
+                ]
+            )
+            percent_complete = (extracted_frames_number / total_video_frames) * 100 if total_video_frames > 0 else 0
+            write_process_status(process_status_q, f"{file_number}. Extracting video frames {percent_complete:.2f}%")
+
+    def extract_video_frames(
+            process_status_q:                   multiprocessing_Queue,
+            event_stop_framegeneration_process: multiprocessing_Event,
+            file_number:                        int,
+            target_directory:                   str,
+            video_path:                         str,
+            selected_image_extension:           str
+        ) -> list[str]:
+
+        # 1. Get total number of frames
+        cap = opencv_VideoCapture(video_path)
+        total_video_frames = int(cap.get(CAP_PROP_FRAME_COUNT))
+        cap.release()
+
+        # 2. Create directory to extract frames
+        create_dir(target_directory)
+
+        # 3. Start monitoring thread
+        stop_extraction_event = multiprocessing_Event()
+        monitor_thread = Thread(
+            target = monitor_extraction_progress,
+            args = (
+                process_status_q,
+                stop_extraction_event,
+                file_number,
+                target_directory,
+                total_video_frames
+            ),
+            daemon = True
+        )
+        monitor_thread.start()
+
+        # 4. Create FFMPEG command to extract video frames
+        output_pattern = os_path_join(target_directory, f"frame_%03d{selected_image_extension}")
+        extraction_command = [
+            FFMPEG_EXE_PATH,
+            "-y",
+            "-loglevel", "error",
+            "-err_detect", "ignore_err",
+            "-i", video_path,
+            "-qscale:v", "2",
+            output_pattern
+        ]
+        
+        # 5. Execute FFMPEG command
+        startupinfo = None
+        if sys.platform == "win32":
+            startupinfo = STARTUPINFO()
+            startupinfo.dwFlags |= STARTF_USESHOWWINDOW
+
+        ffmpeg_process = None
+        try:
+            ffmpeg_process = subprocess_Popen(
+                extraction_command,
+                startupinfo = startupinfo
+            )
+
+            while ffmpeg_process.poll() is None:
+                if event_stop_framegeneration_process.is_set():
+                    print("[FFMPEG] Terminating early due to stop event")
+                    ffmpeg_process.terminate()
+                    ffmpeg_process.wait()
+                    stop_extraction_event.set()
+                    monitor_thread.join()
+                    return []
+                sleep(0.25)
+
+        except Exception as e:
+            write_process_status(process_status_q, f"{ERROR_STATUS} Frame extraction failed: {e}")
+            if ffmpeg_process: ffmpeg_process.kill()
+            stop_extraction_event.set()
+            monitor_thread.join()
+            return []
+
+        # 6. Stop monitoring thread
+        stop_extraction_event.set()
+        monitor_thread.join()
+
+        # 7. Get extracted frames paths and return
+        extracted_files = [
+            os_path_join(target_directory, f)
+            for f in natsorted(os_listdir(target_directory))
+            if f.endswith(f"{selected_image_extension}") and f.startswith("frame_")
+        ]
+
+        return extracted_files
+
     def update_process_status_videos(
-            process_status_q: multiprocessing_Queue, 
-            file_number: int, 
+            process_status_q:         multiprocessing_Queue, 
+            file_number:              int, 
+            complete_frame_sequence:  CompleteFrameSequence,
+            average_processing_time:  float
             ) -> None:
+        
+        total_togenerate_frames_count  = complete_frame_sequence.total_togenerate_frames_count
+        already_generated_frames_count = complete_frame_sequence._calculate_already_generated_frames()
 
-        # Generated frames
-        global global_only_generated_frames_paths
-        if not global_only_generated_frames_paths: return
-        only_generated_frames_counter    = len(global_only_generated_frames_paths)
-        frames_already_generated_counter = len([path for path in global_only_generated_frames_paths if os_path_exists(path)])
-        frames_to_generate_counter       = len([path for path in global_only_generated_frames_paths if not os_path_exists(path)])
-
-        # Processing time
-        global global_processing_times_list
-        if global_processing_times_list:
-            average_processing_time = numpy_mean(global_processing_times_list)
-        else:
-            average_processing_time = 0.0
-
-        remaining_frames = frames_to_generate_counter
+        # Generated frames  
+        remaining_frames = total_togenerate_frames_count - already_generated_frames_count
         remaining_time   = calculate_time_to_complete_video(average_processing_time, remaining_frames)
         if remaining_time != "":
-            percent_complete = (frames_already_generated_counter / only_generated_frames_counter) * 100 
+            percent_complete = (already_generated_frames_count / total_togenerate_frames_count) * 100 
             write_process_status(process_status_q, f"{file_number}. Video frame generation {percent_complete:.2f}% ({remaining_time})")
-    
-    def are_frames_already_generated(generated_images_paths: list[str]) -> bool:
-        already_generated = all(os_path_exists(generated_image_path) for generated_image_path in generated_images_paths)
-        return already_generated
 
-    def manage_video_frames_save_on_disk_async(
-            process_status_q: multiprocessing_Queue,
-            file_number:      int,
-            frames_to_save_q: multiprocessing_Queue,
-            stop_event:       multiprocessing_Event,
-            AI_instance:      AI_interpolation
-            ):
+    def manage_video_frames_save_on_disk(
+            process_status_q:                       multiprocessing_Queue,
+            video_frames_and_info_q:                multiprocessing_Queue,
+            event_stop_framegeneration_process:     multiprocessing_Event,
+            event_stop_framegeneration_save_thread: multiprocessing_Event,
+            file_number:                            int,
+            complete_frame_sequence:                CompleteFrameSequence,
+        ):
+
+        # INTERNAL
+            
+        def _internal_resize_and_save_frame(
+                frame_path: str, 
+                frame: numpy_ndarray, 
+                target_width: int, 
+                target_height: int
+                ) -> None:
+            resized_frame = opencv_resize(frame, (target_width, target_height), interpolation = INTER_LINEAR)
+            image_write(frame_path, resized_frame)
+
+        # MAIN
 
         saved_frames_count = 0
-        
-        try:
+        processing_times_list = []
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            threads_list = []
+
             while True:
-                while not frames_to_save_q.empty():
-                    item = frames_to_save_q.get_nowait()
-                    frame_1                = item["frame_1"]
-                    frame_2                = item["frame_2"]
-                    frame_1_path           = item["frame_1_path"]
-                    frame_2_path           = item["frame_2_path"]
-                    is_frame2_last_frame   = item["is_frame2_last_frame"]
-                    generated_frames       = item["generated_frames"]
-                    generated_frames_paths = item["generated_frames_paths"]
+                if event_stop_framegeneration_process.is_set():
+                    print(f"[Video frames save thread] terminating by framegeneration stop event")
+                    break
 
-                    # Resize with output factor and save frame 1
-                    r_frame1 = AI_instance.resize_with_output_factor(frame_1)
-                    image_write(frame_1_path, r_frame1)
+                if event_stop_framegeneration_save_thread.is_set() and video_frames_and_info_q.empty():
+                    print(f"[Video frames save thread] terminating correctly")
+                    break
 
-                    # Save generated frames
-                    for frame_index, _ in enumerate(generated_frames): 
-                        generated_frame      = generated_frames[frame_index]        
-                        generated_frame_path = generated_frames_paths[frame_index]
+                try:
+                    item = video_frames_and_info_q.get(timeout=0.1)
+                except Empty:
+                    continue
 
-                        image_write(generated_frame_path, generated_frame)
+                frame_1_path           = item["frame_1_path"]
+                frame_1                = item["frame_1"]
+                generated_frames_paths = item["generated_frames_paths"]
+                generated_frames       = item["generated_frames"]
+                processing_time        = item["processing_time"]
 
-                    # # Resize with output factor and save frame 2 (only if is the last video frame)
-                    if is_frame2_last_frame:
-                        r_frame2 = AI_instance.resize_with_output_factor(frame_2)
-                        image_write(frame_2_path, r_frame2)
-                    
-                    saved_frames_count += 1
-
-                    if saved_frames_count % MULTIPLE_FRAMES_TO_SAVE == 0: update_process_status_videos(process_status_q, file_number)
-
-                if stop_event.is_set() and frames_to_save_q.empty(): stop_thread()
-        except:
-            pass
-   
-    def generate_video_frames(
-            selected_AI_model: str,
-            AI_instance: AI_interpolation,
-            extracted_frames_paths: list[str],
-            selected_image_extension: str,
-            frames_to_save_q: multiprocessing_Queue
-            ) -> None:
-        
-        global global_processing_times_list
-    
-        total_frames_number = len(extracted_frames_paths)-1
-
-        for frame_index in range(total_frames_number):
-            frame_1_path = extracted_frames_paths[frame_index]
-            frame_2_path = extracted_frames_paths[frame_index + 1]
-            base_path    = os_path_splitext(frame_1_path)[0]
-
-            frame_gen_factor       = AI_instance.frame_gen_factor
-            generated_frames_paths = prepare_generated_frames_paths(base_path, selected_AI_model, selected_image_extension, frame_gen_factor)
-            already_generated      = are_frames_already_generated(generated_frames_paths)
-            
-            if already_generated == False:
-                start_timer = timer()
-
-                # Load frames
-                frame_1 = image_read(frame_1_path)
-                frame_2 = image_read(frame_2_path)
-                
-                # Generate frames
-                generated_frames = AI_instance.AI_orchestration(frame_1, frame_2)
-
-                if frame_index == total_frames_number: 
-                    is_frame2_last_frame = True
-                else:
-                    is_frame2_last_frame = False
-                
-                # Save frames in queue
-                frames_to_save_q.put(
-                    {
-                        "frame_1":                frame_1,
-                        "frame_2":                frame_2,
-                        "frame_1_path":           frame_1_path,
-                        "frame_2_path":           frame_2_path,
-                        "is_frame2_last_frame":   is_frame2_last_frame,
-                        "generated_frames":       generated_frames,
-                        "generated_frames_paths": generated_frames_paths,
-                    }
+                # Resize with output factor and save frame 1
+                threads_list.append(
+                    executor.submit(
+                        _internal_resize_and_save_frame, 
+                        frame_1_path, 
+                        frame_1, 
+                        complete_frame_sequence.target_width,
+                        complete_frame_sequence.target_height
+                    )
                 )
 
-                # Calculate processing time
-                end_timer       = timer()
-                processing_time = (end_timer - start_timer)
-                global_processing_times_list.append(processing_time)
+                # Save generated frames
+                for frame_index, _ in enumerate(generated_frames): 
+                    generated_frame      = generated_frames[frame_index]        
+                    generated_frame_path = generated_frames_paths[frame_index]
+                    threads_list.append(
+                        executor.submit(
+                            _internal_resize_and_save_frame, 
+                            generated_frame_path, 
+                            generated_frame, 
+                            complete_frame_sequence.target_width,
+                            complete_frame_sequence.target_height
+                        )
+                    )
 
-                if len(global_processing_times_list) >= 100: global_processing_times_list = []
+                saved_frames_count += 1
+                processing_times_list.append(processing_time)
 
+                if saved_frames_count % FRAMES_TO_SAVE_BATCH == 0:
+                    if processing_times_list:
+                        average_processing_time = numpy_mean(processing_times_list)
+                        if len(processing_times_list) >= 100: processing_times_list = []
+                        update_process_status_videos(process_status_q, file_number, complete_frame_sequence, average_processing_time)
+
+            for t in threads_list: t.result()
+   
+    def generate_video_frames(
+            process_status_q:                   multiprocessing_Queue,
+            video_frames_and_info_q:            multiprocessing_Queue,
+            event_stop_framegeneration_process: multiprocessing_Event,
+            file_number:                        int,
+            complete_frame_sequence:            CompleteFrameSequence,
+            selected_AI_model:                  str,
+            frame_gen_factor:                   int,
+            selected_AI_multithreading:         int, 
+            selected_gpu:                       str,
+            ) -> None:
+        
+        event_stop_framegeneration_save_thread = multiprocessing_Event()
+        Thread(
+            target = manage_video_frames_save_on_disk,
+            args   = (
+                process_status_q, 
+                video_frames_and_info_q,
+                event_stop_framegeneration_process,
+                event_stop_framegeneration_save_thread,
+                file_number,
+                complete_frame_sequence,
+            )
+        ).start()
+
+        frame_sequence_chunks = numpy_array_split(complete_frame_sequence.get_only_sequence_pairs_to_generate(), selected_AI_multithreading)
+        frame_sequence_chunks = [list(chunk) for chunk in frame_sequence_chunks]
+
+        with multiprocessing_Pool(selected_AI_multithreading) as pool:
+            pool.starmap(
+                generate_video_frames_async,
+                zip(
+                    repeat(video_frames_and_info_q),
+                    repeat(event_stop_framegeneration_process),
+                    frame_sequence_chunks,
+                    repeat(selected_AI_model),
+                    repeat(frame_gen_factor),
+                    repeat(selected_AI_multithreading),
+                    repeat(selected_gpu),
+                    repeat(complete_frame_sequence.AI_input_height),
+                    repeat(complete_frame_sequence.AI_input_width),
+                )
+            )
+    
+        write_process_status(process_status_q, f"{file_number}. Finalizing frame generation")
+        event_stop_framegeneration_save_thread.set()
+        sleep(5)
 
 
     # Main function
     
     # 1.Preparation
-    global global_only_generated_frames_paths
-    global global_processing_times_list
-    global_processing_times_list = []
-    
-    frames_to_save_q = multiprocessing_Queue(maxsize=100)
-    stop_event = multiprocessing_Event()
-    Thread(
-        target = manage_video_frames_save_on_disk_async,
-        args   = (process_status_q, file_number, frames_to_save_q, stop_event, AI_instance)
-    ).start()
-
     target_directory  = prepare_output_video_directory_name(video_path, selected_output_path, selected_AI_model, frame_gen_factor, slowmotion,  input_resize_factor, output_resize_factor)
     video_output_path = prepare_output_video_filename(video_path, selected_output_path, selected_AI_model, frame_gen_factor, slowmotion, input_resize_factor, output_resize_factor, selected_video_extension)
+
 
     # 2. Resume frame generation OR extract video frames
     frame_generation_resume = check_video_frame_generation_resume(target_directory, selected_AI_model, selected_image_extension)
     if frame_generation_resume:
         write_process_status(process_status_q, f"{file_number}. Resume frame generation")
-        extracted_frames_paths = get_video_frames_for_frame_generation_resume(target_directory, selected_AI_model, selected_image_extension)
+        extracted_frames_paths = get_video_frames_for_frame_generation_resume(
+            target_directory         = target_directory,
+            selected_AI_model        = selected_AI_model, 
+            selected_image_extension = selected_image_extension
+        )
     else:
         write_process_status(process_status_q, f"{file_number}. Extracting video frames")
-        extracted_frames_paths = extract_video_frames(process_status_q, file_number, target_directory, AI_instance, video_path, cpu_number, selected_image_extension)
+        extracted_frames_paths = extract_video_frames(
+            process_status_q                   = process_status_q,
+            event_stop_framegeneration_process = event_stop_framegeneration_process,
+            file_number                        = file_number, 
+            target_directory                   = target_directory, 
+            video_path                         = video_path,
+            selected_image_extension           = selected_image_extension
+        )
 
-    total_frames_paths                 = prepare_output_video_frame_filenames(extracted_frames_paths, selected_AI_model, frame_gen_factor, selected_image_extension)
-    global_only_generated_frames_paths = prepare_output_video_frame_to_generate_filenames(extracted_frames_paths, selected_AI_model, frame_gen_factor, selected_image_extension)
+    complete_frame_sequence = CompleteFrameSequence(
+        frame_sequence_list = prepare_frame_sequence_pair_list(
+            extracted_frames_paths, 
+            selected_AI_model, 
+            frame_gen_factor, 
+            selected_image_extension
+            ),
+        input_resize_factor  = input_resize_factor,
+        output_resize_factor = output_resize_factor
+    )
 
     # 3. Frame generation
     write_process_status(process_status_q, f"{file_number}. Video frame generation")
-    generate_video_frames(selected_AI_model, AI_instance, extracted_frames_paths, selected_image_extension, frames_to_save_q)
+    generate_video_frames(
+        process_status_q                   = process_status_q,
+        video_frames_and_info_q            = video_frames_and_info_q,
+        event_stop_framegeneration_process = event_stop_framegeneration_process,
+        file_number                        = file_number,
+        complete_frame_sequence            = complete_frame_sequence,
+        selected_AI_model                  = selected_AI_model, 
+        frame_gen_factor                   = frame_gen_factor,
+        selected_gpu                       = selected_gpu,
+        selected_AI_multithreading         = selected_AI_multithreading,
+    )
 
-    # 4. Stop save frames thread
-    write_process_status(process_status_q, f"{file_number}. Finalizing frame generation")
-    stop_event.set()
-    sleep(5)
 
-    # 5. Video encoding
+    # 4. Video encoding
     write_process_status(process_status_q, f"{file_number}. Encoding frame-generated video")
-    video_encoding(process_status_q, video_path, video_output_path, total_frames_paths, frame_gen_factor, slowmotion, selected_video_codec)
+    video_encoding(process_status_q, video_path, video_output_path, complete_frame_sequence._get_ordered_frame_sequence(), frame_gen_factor, slowmotion, selected_video_codec)
     copy_file_metadata(video_path, video_output_path)
 
-    # 6. Delete frames folder
+
+    # 5. Delete frames folder
     if selected_keep_frames == False: 
         if os_path_exists(target_directory): 
             remove_directory(target_directory)
@@ -1843,6 +2059,13 @@ def select_framegeneration_option_from_menu(selected_option: str):
     selected_generation_option = selected_option
     update_file_widget(1,2,3)
 
+def select_AI_multithreading_from_menu(selected_option: str) -> None:
+    global selected_AI_multithreading
+    if selected_option == "OFF": 
+        selected_AI_multithreading = 1
+    else: 
+        selected_AI_multithreading = int(selected_option.split()[0])
+
 def select_gpu_from_menu(selected_option: str) -> None:
     global selected_gpu    
     selected_gpu = selected_option
@@ -1917,7 +2140,6 @@ def place_loadFile_section():
     background = CTkFrame(master = window, fg_color = background_color, corner_radius = 1)
 
     text_drop = (" SUPPORTED FILES \n\n "
-               + "IMAGES • jpg png tif bmp webp heic \n " 
                + "VIDEOS • mp4 webm mkv flv gif avi mov mpg qt 3gp ")
 
     input_file_text = CTkLabel(
@@ -2033,6 +2255,45 @@ def place_generation_option_menu():
     info_button.place(relx = column_info1, rely = widget_row, anchor = "center")
     option_menu.place(relx = column_3_5,   rely = widget_row, anchor = "center")
 
+def place_AI_multithreading_menu():
+
+    def open_info_AI_multithreading():
+        option_list = [
+            " This option can enhance video upscaling performance, especially on powerful GPUs.",
+
+            " \n AI MULTITHREADING OPTIONS\n"
+            + "  • OFF - Processes one frame at a time.\n"
+            + "  • 2 threads - Processes two frames simultaneously.\n"
+            + "  • 4 threads - Processes four frames simultaneously.\n"
+            + "  • 6 threads - Processes six frames simultaneously.\n"
+            + "  • 8 threads - Processes eight frames simultaneously.\n",
+
+            " \n NOTES\n"
+            + "  • Higher thread counts increase CPU, GPU, and RAM usage.\n"
+            + "  • The GPU may be heavily stressed, potentially reaching high temperatures.\n"
+            + "  • Monitor your system's temperature to prevent overheating.\n"
+            + "  • If the chosen thread count exceeds GPU capacity, the app automatically selects an optimal value.\n",
+        ]
+
+        MessageBox(
+            messageType   = "info",
+            title         = "AI multithreading (EXPERIMENTAL)", 
+            subtitle      = "This widget allows to choose how many video frames are upscaled simultaneously",
+            default_value = None,
+            option_list   = option_list
+        )
+
+
+    widget_row = row3
+    background = create_option_background()
+    background.place(relx = 0.75, rely = widget_row, relwidth = 0.48, anchor = "center")
+
+    info_button = create_info_button(open_info_AI_multithreading, "AI multithreading")
+    option_menu = create_option_menu(select_AI_multithreading_from_menu, AI_multithreading_list, default_AI_multithreading)
+
+    info_button.place(relx = column_info1, rely = widget_row, anchor = "center")
+    option_menu.place(relx = column_3_5,   rely = widget_row, anchor = "center")
+
 def place_input_output_resolution_textboxs():
 
     def open_info_input_resolution():
@@ -2057,7 +2318,14 @@ def place_input_output_resolution_textboxs():
 
     def open_info_output_resolution():
         option_list = [
-            " TBD ",
+            " 100% keeps the exact resolution produced by the AI",
+            " A lower value (<100%) will downscale the AI result to a smaller resolution, saving space and processing time",
+            " A higher value (>100%) will upscale the AI output, increasing size but not adding real details",
+
+            "\n For example, if the AI generates a 4K (3840x2160) image/video\n" +
+            " • Output scale 50%  => final output 1920x1080 (downscaled)\n" +
+            " • Output scale 100% => final output 3840x2160 (AI native)\n" +
+            " • Output scale 200% => final output 7680x4320 (8K, interpolated)\n",
         ]
 
         MessageBox(
@@ -2069,7 +2337,7 @@ def place_input_output_resolution_textboxs():
         )
 
 
-    widget_row = row3
+    widget_row = row4
     background = create_option_background()
     background.place(relx = 0.75, rely = widget_row, relwidth = 0.48, anchor = "center")
 
@@ -2113,7 +2381,7 @@ def place_gpu_menu():
         )
 
 
-    widget_row = row4
+    widget_row = row5
 
     background  = create_option_background()
     background.place(relx = 0.75, rely = widget_row, relwidth = 0.48, anchor = "center")
@@ -2161,8 +2429,8 @@ def place_image_video_output_menus():
 
         MessageBox(
             messageType   = "info",
-            title         = "Image output",
-            subtitle      = "This widget allows to choose the extension of upscaled images",
+            title         = "Frame output",
+            subtitle      = "This widget allows to choose the extension of generated frames",
             default_value = None,
             option_list   = option_list
         )
@@ -2202,13 +2470,13 @@ def place_image_video_output_menus():
             option_list   = option_list
         )
 
-    widget_row = row5
+    widget_row = row6
 
     background = create_option_background()
     background.place(relx = 0.75, rely = widget_row, relwidth = 0.48, anchor = "center")
 
     # Image output
-    info_button = create_info_button(open_info_image_output, "Image output")
+    info_button = create_info_button(open_info_image_output, "Frame output")
     option_menu = create_option_menu(select_image_extension_from_menu, image_extension_list, default_image_extension, width = little_menu_width)
     info_button.place(relx = column_info1,        rely = widget_row, anchor = "center")
     option_menu.place(relx = column_1_4, rely = widget_row, anchor = "center")
@@ -2267,7 +2535,7 @@ def place_video_codec_keep_frames_menus():
         )
 
 
-    widget_row = row6
+    widget_row = row7
 
     background = create_option_background()
     background.place(relx = 0.75, rely = widget_row, relwidth = 0.48, anchor = "center")
@@ -2317,15 +2585,15 @@ def place_message_label():
     message_label = CTkLabel(
         master        = window, 
         textvariable  = info_message,
-        height        = 26,
-        width         = 220,
+        height        = 24,
+        width         = 247,
         font          = bold11,
         fg_color      = "#ffbf00",
         text_color    = "#000000",
         anchor        = "center",
         corner_radius = 1
     )
-    message_label.place(relx = 0.84, rely = 0.9495, anchor = "center")
+    message_label.place(relx = 0.85, rely = 0.9495, anchor = "center")
 
 def place_stop_button(): 
     stop_button = create_active_button(
@@ -2360,12 +2628,11 @@ def on_app_close():
     global selected_AI_model
     global selected_generation_option
     global selected_gpu
-    
+    global selected_AI_multithreading
+
     global selected_keep_frames
     global selected_image_extension
     global selected_video_extension
-    global resize_factor
-    global cpu_number
 
     generation_option_to_save = f"{selected_generation_option}"
     gpu_to_save               = f"{selected_gpu}"
@@ -2385,9 +2652,15 @@ def on_app_close():
     else:
         keep_frames_to_save = "OFF"
 
+    if selected_AI_multithreading == 1: 
+        AI_multithreading_to_save = "OFF"
+    else: 
+        AI_multithreading_to_save = f"{selected_AI_multithreading} threads"
+
     user_preference = {
         "default_AI_model":             AI_model_to_save,
         "default_generation_option":    generation_option_to_save,
+        "default_AI_multithreading":    AI_multithreading_to_save,
         "default_gpu":                  gpu_to_save,
         "default_keep_frames":          keep_frames_to_save,
         "default_image_extension":      image_extension_to_save,
@@ -2401,7 +2674,7 @@ def on_app_close():
     with open(USER_PREFERENCE_PATH, "w") as preference_file:
         preference_file.write(user_preference_json)
 
-    stop_generation_process()
+    stop_framegeneration_process()
 
 class App():
     def __init__(self, window):
@@ -2422,12 +2695,11 @@ class App():
 
         place_AI_menu()
         place_generation_option_menu()
+        place_AI_multithreading_menu()
         place_input_output_resolution_textboxs()
-
         place_gpu_menu()
-        place_video_codec_keep_frames_menus()
-
         place_image_video_output_menus()
+        place_video_codec_keep_frames_menus()
 
         place_message_label()
         place_generation_button()
@@ -2444,6 +2716,7 @@ if __name__ == "__main__":
         with open(USER_PREFERENCE_PATH, "r") as json_file:
             json_data = json_load(json_file)
             default_AI_model             = json_data.get("default_AI_model",             AI_models_list[0])
+            default_AI_multithreading    = json_data.get("default_AI_multithreading",    AI_multithreading_list[0])
             default_generation_option    = json_data.get("default_generation_option",    generation_options_list[0])
             default_gpu                  = json_data.get("default_gpu",                  gpus_list[0])
             default_keep_frames          = json_data.get("default_keep_frames",          keep_frames_list[0])
@@ -2456,6 +2729,7 @@ if __name__ == "__main__":
     else:
         print(f"[{app_name}] Preference file does not exist, using default coded value")
         default_AI_model             = AI_models_list[0]
+        default_AI_multithreading    = AI_multithreading_list[0]
         default_generation_option    = generation_options_list[0]
         default_gpu                  = gpus_list[0]
         default_image_extension      = image_extension_list[0]
@@ -2467,11 +2741,21 @@ if __name__ == "__main__":
         default_output_resize_factor = str(100)
 
     multiprocessing_freeze_support()
-
-    process_status_q = multiprocessing_Queue(maxsize=1)
-
     set_appearance_mode("Dark")
     set_default_color_theme("dark-blue")
+
+    # Get total RAM of the PC
+    ram_gb = round(psutil_virtual_memory().total / (1024**3))
+    if ram_gb <= 8:    queue_maxsize = 100
+    elif ram_gb <= 16: queue_maxsize = 250
+    elif ram_gb <= 32: queue_maxsize = 500
+    else:              queue_maxsize = 1000
+    
+    # Multiprocessing utilities
+    multiprocessing_manager            = multiprocessing_Manager()
+    process_status_q                   = multiprocessing_manager.Queue(maxsize=1)
+    video_frames_and_info_q            = multiprocessing_manager.Queue(maxsize=queue_maxsize)
+    event_stop_framegeneration_process = multiprocessing_manager.Event()
 
     window = CTk() 
 
@@ -2483,6 +2767,7 @@ if __name__ == "__main__":
     global selected_file_list
     global selected_AI_model
     global selected_generation_option
+    global selected_AI_multithreading
     global selected_gpu 
     global selected_keep_frames
     global selected_image_extension
@@ -2498,8 +2783,15 @@ if __name__ == "__main__":
     selected_video_extension   = default_video_extension
     selected_video_codec       = default_video_codec
 
-    if default_keep_frames == "ON": selected_keep_frames = True
-    else:                           selected_keep_frames = False
+    if default_AI_multithreading == "OFF": 
+        selected_AI_multithreading = 1
+    else: 
+        selected_AI_multithreading = int(default_AI_multithreading.split()[0])
+
+    if default_keep_frames == "ON": 
+        selected_keep_frames = True
+    else:                           
+        selected_keep_frames = False
 
     selected_input_resize_factor.set(default_input_resize_factor)
     selected_output_resize_factor.set(default_output_resize_factor)
