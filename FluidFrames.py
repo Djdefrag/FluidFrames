@@ -1689,7 +1689,7 @@ def video_frame_generation(
         monitor_thread.start()
 
         # 4. Create FFMPEG command to extract video frames
-        output_pattern = os_path_join(target_directory, "frame_%03d.jpg")
+        output_pattern = os_path_join(target_directory, f"frame_%03d{selected_image_extension}")
         extraction_command = [
             FFMPEG_EXE_PATH,
             "-y",
@@ -1718,7 +1718,7 @@ def video_frame_generation(
                     stop_extraction_event.set()
                     monitor_thread.join()
                     return []
-                sleep(0.25)
+                sleep(0.2)
 
         except Exception as e:
             write_process_status(process_status_q, f"{ERROR_STATUS} Frame extraction failed: {e}")
