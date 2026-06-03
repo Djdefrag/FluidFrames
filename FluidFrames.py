@@ -9,7 +9,7 @@ from timeit     import default_timer as timer
 
 from typing    import Callable
 from threading import Thread
-from queue     import Empty
+from queue     import Empty, Full
 from itertools import repeat
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import ( 
@@ -72,7 +72,7 @@ from cv2 import (
     CAP_PROP_FRAME_WIDTH,
     COLOR_BGR2RGB,
     IMREAD_UNCHANGED,
-    INTER_LINEAR,
+    INTER_CUBIC,
     VideoCapture as opencv_VideoCapture,
     cvtColor     as opencv_cvtColor,
     imdecode     as opencv_imdecode,
@@ -124,7 +124,7 @@ def find_by_relative_path(relative_path: str) -> str:
 
 
 app_name   = "FluidFrames"
-version    = "4.6"
+version    = "4.8"
 githubme   = "https://github.com/Djdefrag/FluidFrames/releases"
 telegramme = "https://linktr.ee/j3ngystudio"
 
@@ -388,7 +388,7 @@ class AI_interpolation:
         return height, width 
 
     def resize_with_AI_input_resolution(self, image: numpy_ndarray) -> numpy_ndarray:
-        return opencv_resize(image, (self.AI_input_width, self.AI_input_height), interpolation = INTER_LINEAR)
+        return opencv_resize(image, (self.AI_input_width, self.AI_input_height), interpolation = INTER_CUBIC)
 
 
 
@@ -1178,10 +1178,11 @@ def video_encoding(
     if os_path_exists(no_audio_path): os_remove(no_audio_path)
     if os_path_exists(txt_path):      os_remove(txt_path)
 
-    # Create a file .txt with all upscaled video frames paths || this file is essential
-    with os_fdopen(os_open(txt_path, O_WRONLY | O_CREAT, 0o777), 'w') as txt:
+    # Create a file .txt with all video frames paths (original+generated) || this file is essential
+    with os_fdopen(os_open(txt_path, O_WRONLY | O_CREAT, 0o777), 'w', encoding="utf-8") as txt:
         for frame_path in total_frames_paths:
-            txt.write(f"file '{frame_path}' \n")
+            if os_path_exists(frame_path):
+                txt.write(f"file '{frame_path}' \n")
 
 
     # Create the final video without audio
@@ -1398,6 +1399,20 @@ def stop_framegeneration_process() -> None:
         print(f"[{app_name}] stop_framegeneration_process - waiting for framegeneration orchestrator to terminate")
         process_frame_generation_orchestrator.kill()
         print(f"[{app_name}] stop_framegeneration_process - framegeneration orchestrator terminated")
+    
+    try:
+        while not process_status_q.empty(): process_status_q.get_nowait()
+        print(f"[{app_name}] stop_upscale_process - process_status_q cleared")
+    except Exception as e:
+        print(f"[{app_name}] Warning clearing process_status_q: {e}")
+
+    try:
+        while not video_frames_and_info_q.empty(): video_frames_and_info_q.get_nowait()
+        print(f"[{app_name}] stop_upscale_process - video_frames_and_info_q cleared")
+    except Exception as e:
+        print(f"[{app_name}] Warning clearing video_frames_and_info_q: {e}")
+
+    event_stop_framegeneration_process.clear()
 
 def stop_button_command() -> None:
     stop_framegeneration_process()
@@ -1524,6 +1539,7 @@ def frame_generation_orchestrator(
 
 # FRAME GENERATION
 
+# Function executed as process
 def generate_video_frames_async(
         video_frames_and_info_q:    multiprocessing_Queue,
         event_stop_upscale_process: multiprocessing_Event,
@@ -1534,10 +1550,8 @@ def generate_video_frames_async(
         selected_gpu:               str,
         AI_input_height:            int,
         AI_input_width:             int,
-        ):
-    
-    # MAIN
-    
+    ):
+        
     AI_instance = AI_interpolation(selected_AI_model, frame_gen_factor, selected_gpu, AI_input_height, AI_input_width)
     
     for frame_sequence_pair in frame_sequence_pair_list:
@@ -1557,18 +1571,25 @@ def generate_video_frames_async(
 
         # Calculate processing time
         end_timer       = timer()
-        processing_time = (end_timer - start_timer)/selected_AI_multithreading
+        processing_time = round((end_timer - start_timer)/selected_AI_multithreading, 2)
         
-        # Save frames in queue
-        video_frames_and_info_q.put(
-            {
-                "frame_1_path":           frame_sequence_pair.start_frame_path,
-                "frame_1":                frame_1,
-                "generated_frames_paths": frame_sequence_pair.to_generate_frames_paths,
-                "generated_frames":       generated_frames,
-                "processing_time":        processing_time
-            }
-        )
+        # Add things in queue
+        success = False
+        while success == False:
+            try:
+                video_frames_and_info_q.put_nowait(
+                    {
+                        "frame_1_path":           frame_sequence_pair.start_frame_path,
+                        "frame_1":                frame_1,
+                        "generated_frames_paths": frame_sequence_pair.to_generate_frames_paths,
+                        "generated_frames":       generated_frames,
+                        "processing_time":        processing_time
+                    }
+                )
+                success = True
+                break
+            except Full:
+                sleep(0.1)
 
 def video_frame_generation(
         process_status_q:                   multiprocessing_Queue,
@@ -1624,7 +1645,7 @@ def video_frame_generation(
         ):
 
         while not stop_extraction_event.is_set():
-            sleep(1)
+            sleep(2)
             extracted_frames_number = len(
                 [
                     f for f in os_listdir(target_directory)
@@ -1646,6 +1667,7 @@ def video_frame_generation(
         # 1. Get total number of frames
         cap = opencv_VideoCapture(video_path)
         total_video_frames = int(cap.get(CAP_PROP_FRAME_COUNT))
+        frame_rate         = cap.get(CAP_PROP_FPS)
         cap.release()
 
         # 2. Create directory to extract frames
@@ -1667,14 +1689,15 @@ def video_frame_generation(
         monitor_thread.start()
 
         # 4. Create FFMPEG command to extract video frames
-        output_pattern = os_path_join(target_directory, f"frame_%03d{selected_image_extension}")
+        output_pattern = os_path_join(target_directory, "frame_%03d.jpg")
         extraction_command = [
             FFMPEG_EXE_PATH,
             "-y",
-            "-loglevel", "error",
+            "-loglevel",   "error",
             "-err_detect", "ignore_err",
-            "-i", video_path,
-            "-qscale:v", "2",
+            "-i",          video_path,
+            "-r",          str(frame_rate),
+            "-qscale:v",   "3",
             output_pattern
         ]
         
@@ -1686,11 +1709,7 @@ def video_frame_generation(
 
         ffmpeg_process = None
         try:
-            ffmpeg_process = subprocess_Popen(
-                extraction_command,
-                startupinfo = startupinfo
-            )
-
+            ffmpeg_process = subprocess_Popen(extraction_command, startupinfo = startupinfo)
             while ffmpeg_process.poll() is None:
                 if event_stop_framegeneration_process.is_set():
                     print("[FFMPEG] Terminating early due to stop event")
@@ -1746,8 +1765,6 @@ def video_frame_generation(
             file_number:                            int,
             complete_frame_sequence:                CompleteFrameSequence,
         ):
-
-        # INTERNAL
             
         def _internal_resize_and_save_frame(
                 frame_path: str, 
@@ -1755,16 +1772,22 @@ def video_frame_generation(
                 target_width: int, 
                 target_height: int
                 ) -> None:
-            resized_frame = opencv_resize(frame, (target_width, target_height), interpolation = INTER_LINEAR)
+            resized_frame = opencv_resize(frame, (target_width, target_height), interpolation = INTER_CUBIC)
             image_write(frame_path, resized_frame)
 
-        # MAIN
+        saved_frames_count      = 0
+        processing_times_list   = []
 
-        saved_frames_count = 0
-        processing_times_list = []
+        UPDATE_STATUS_TIMER     = 3.0
+        MAX_UPDATE_STATUS_TIMER = 10.0
+        MIN_UPDATE_STATUS_TIMER = 3.0
+        TIMER_TICK_PLUS         = 1.5
+        TIMER_TICK_MINUS        = 0.5
+        can_you_change_timer    = False
+        last_update_time        = timer()
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            threads_list = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            threads_set = set()
 
             while True:
                 if event_stop_framegeneration_process.is_set():
@@ -1775,9 +1798,23 @@ def video_frame_generation(
                     print(f"[Video frames save thread] terminating correctly")
                     break
 
+                # if the video frames queue is full we extend UPDATE_STATUS_TIMER
+                if video_frames_and_info_q.full() and can_you_change_timer:
+                    can_you_change_timer = False
+                    UPDATE_STATUS_TIMER += TIMER_TICK_PLUS
+                    if UPDATE_STATUS_TIMER > MAX_UPDATE_STATUS_TIMER: UPDATE_STATUS_TIMER = MAX_UPDATE_STATUS_TIMER
+
+                # if the video frames queue has < 25 elements we remove time from UPDATE_STATUS_TIMER
+                if video_frames_and_info_q.qsize() < 25 and can_you_change_timer:
+                    can_you_change_timer = False
+                    UPDATE_STATUS_TIMER -= TIMER_TICK_MINUS
+                    if UPDATE_STATUS_TIMER < MIN_UPDATE_STATUS_TIMER: UPDATE_STATUS_TIMER = MIN_UPDATE_STATUS_TIMER
+
+                # get frames from queue
                 try:
-                    item = video_frames_and_info_q.get(timeout=0.1)
+                    item = video_frames_and_info_q.get_nowait()
                 except Empty:
+                    sleep(0.1)
                     continue
 
                 frame_1_path           = item["frame_1_path"]
@@ -1786,8 +1823,11 @@ def video_frame_generation(
                 generated_frames       = item["generated_frames"]
                 processing_time        = item["processing_time"]
 
+                processing_times_list.append(processing_time)
+                saved_frames_count += 1
+    
                 # Resize with output factor and save frame 1
-                threads_list.append(
+                threads_set.add(
                     executor.submit(
                         _internal_resize_and_save_frame, 
                         frame_1_path, 
@@ -1801,7 +1841,7 @@ def video_frame_generation(
                 for frame_index, _ in enumerate(generated_frames): 
                     generated_frame      = generated_frames[frame_index]        
                     generated_frame_path = generated_frames_paths[frame_index]
-                    threads_list.append(
+                    threads_set.add(
                         executor.submit(
                             _internal_resize_and_save_frame, 
                             generated_frame_path, 
@@ -1811,16 +1851,24 @@ def video_frame_generation(
                         )
                     )
 
-                saved_frames_count += 1
-                processing_times_list.append(processing_time)
+                # every few seconds:
+                # - we update the timer
+                # - we clean threads_set removing completed threads
+                # - we calculate the % and ETA of completion
+                now = timer()
+                if now - last_update_time >= UPDATE_STATUS_TIMER:
+                    can_you_change_timer = True
+                    last_update_time     = now
 
-                if saved_frames_count % FRAMES_TO_SAVE_BATCH == 0:
+                    done_threads = {t for t in threads_set if t.done()}
+                    threads_set -= done_threads
+                        
                     if processing_times_list:
                         average_processing_time = numpy_mean(processing_times_list)
-                        if len(processing_times_list) >= 100: processing_times_list = []
+                        processing_times_list = []
                         update_process_status_videos(process_status_q, file_number, complete_frame_sequence, average_processing_time)
 
-            for t in threads_list: t.result()
+            for t in threads_set: t.result()
    
     def generate_video_frames(
             process_status_q:                   multiprocessing_Queue,
@@ -2745,11 +2793,9 @@ if __name__ == "__main__":
     set_default_color_theme("dark-blue")
 
     # Get total RAM of the PC
-    ram_gb = round(psutil_virtual_memory().total / (1024**3))
-    if ram_gb <= 8:    queue_maxsize = 100
-    elif ram_gb <= 16: queue_maxsize = 250
-    elif ram_gb <= 32: queue_maxsize = 500
-    else:              queue_maxsize = 1000
+    free_ram_gb   = psutil_virtual_memory().available / (1024**3)
+    queue_maxsize = max(50, int(free_ram_gb * 25))
+    print(f"[__main__] free RAM: {free_ram_gb:.2f} GB | queue_maxsize = {queue_maxsize}")
     
     # Multiprocessing utilities
     multiprocessing_manager            = multiprocessing_Manager()
