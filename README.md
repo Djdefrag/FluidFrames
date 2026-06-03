@@ -1,7 +1,7 @@
 <div align="center">
     <br>
     <img src="https://user-images.githubusercontent.com/32263112/216588514-0ad68175-c65e-47ee-9ca8-d163572d9be9.png" width="175"> </a> 
-    <br><br>FluidFrames.RIFE | video AI frame generation app <br><br>
+    <br><br>FluidFrames | video AI frame generation app <br><br>
     <a href="https://jangystudio.itch.io/fluidframesrife">
          <button>
             <img src="https://static.itch.io/images/badge-color.svg" width="225" height="70">
@@ -15,9 +15,8 @@
 </div>
 <br>
 <div align="center">
-    <img src="https://github.com/user-attachments/assets/69522490-691c-4156-853f-6d17910d29e6"> </a> 
+    <img src="https://github.com/user-attachments/assets/c1d2361e-9c5f-4ae3-b92a-277866a2734b"> </a> 
 </div>
-
 
 ## What is FluidFrames.RIFE?
 FluidFrames.RIFE is a Windows app powered by RIFE AI to create frame-generated and slowmotion videos.
@@ -104,7 +103,10 @@ Getting started.
 - [ ] 4.X version
     - [x] Hardware accelerated video encoding (nvenc / amf / qsv)
     - [x] More video extensions (.mp4 / .mkv / .avi / .mov)
-    - [x] Output resolution scaling
+    - [x] Choose output resolution scaling
+    - [x] Video AI multi-threading frame generation
+    - [x] Updated AI-engine (onnxruntime-directml)
+    - [x] Video frames extraction by FFMPEG (x10 times faster)
 
 
 ### Some Examples.
