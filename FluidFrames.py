@@ -267,6 +267,7 @@ class AI_interpolation:
 
         sess_options = onnxruntime_SessionOptions()
         sess_options.enable_profiling = False
+        sess_options.log_severity_level = 3
 
         inference_session = onnxruntime_InferenceSession(
             path_or_bytes    = self.AI_model_path, 
