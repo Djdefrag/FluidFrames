@@ -6,17 +6,7 @@ numpy==1.26.4
 customtkinter
 
 #UTILS
-moviepy
 opencv-python-headless
+Pillow
 natsort
-pyinstaller
-imageio
-natsort
-proglog
-tqdm
-imageio
-imageio-ffmpeg
-decorator
-pillow
-packaging
-darkdetect
+pyinstaller==6.11.1
