@@ -15,7 +15,7 @@
 </div>
 <br>
 <div align="center">
-    <img src="https://github.com/user-attachments/assets/47c4a9ab-0f19-438d-8128-7bc1a09a0d54"> </a> 
+    <img src="https://github.com/user-attachments/assets/69522490-691c-4156-853f-6d17910d29e6"> </a> 
 </div>
 
 
@@ -93,7 +93,7 @@ Getting started.
     - [x] Save AI generated frames as files
     - [x] Support RIFE AI model updates
     - [x] Support for RIFE_Lite AI model (a faster and lighter version of RIFE) 
-- [ ] 3.x versions (now under development)
+- [x] 3.x versions 
     - [x] New AI engine powered by onnxruntime-directml (https://github.com/microsoft/onnxruntime)
     - [x] Python 3.11 (performance improvements)
     - [x] Python 3.12 (performance improvements)
@@ -101,6 +101,10 @@ Getting started.
     - [x] FFMPEG 7 (latest release)
     - [x] Saving user settings (AI model, GPU, CPU etc.)
     - [x] Video frame-generation STOP&RESUME
+- [ ] 4.X version
+    - [x] Hardware accelerated video encoding (nvenc / amf / qsv)
+    - [x] More video extensions (.mp4 / .mkv / .avi / .mov)
+    - [x] Output resolution scaling
 
 
 ### Some Examples.
