@@ -16,7 +16,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import IO
 
-from iso_env import IsoEnv, IsoEnvArgs, Requirements
+from fluidframes_rife._vendor.iso_env import IsoEnv, IsoEnvArgs, Requirements
 
 RUNTIME_ENV_VAR = "FLUIDFRAMES_RUNTIME_ENV"
 RUNTIME_TIMEOUT_ENV_VAR = "FLUIDFRAMES_LAUNCH_TIMEOUT_SECONDS"

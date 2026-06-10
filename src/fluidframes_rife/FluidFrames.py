@@ -1418,6 +1418,7 @@ def generate_video_frames(
     
     generated_frames_to_save       = []
     generated_frames_paths_to_save = []
+    save_threads                 = []
     
     frame_processing_times = []
 
@@ -1452,6 +1453,7 @@ def generate_video_frames(
                     )
                 )
                 thread.start()
+                save_threads.append(thread)
 
                 generated_frames_to_save = []
                 generated_frames_paths_to_save = []
@@ -1475,6 +1477,11 @@ def generate_video_frames(
             )
         )
         thread.start()
+        save_threads.append(thread)
+
+    # Ensure all generated frames are fully written before encoding starts
+    for thread in save_threads:
+        thread.join()
 
         generated_frames_to_save = []
         generated_frames_paths_to_save = []
