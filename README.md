@@ -40,21 +40,35 @@ FluidFrames is completely written in Python, from backend to frontend.
 - [x] moviepy (https://github.com/Zulko/moviepy)
 - [x] pyInstaller (https://github.com/pyinstaller/pyinstaller)
 
-## Make it work by yourself. 👨‍💻
-Prerequisites.
-- Python installed on your pc (https://www.python.org/downloads/release/python-3119/)
-- VSCode installed on your pc (https://code.visualstudio.com/)
-- FFMPEG.exe downloaded (https://www.gyan.dev/ffmpeg/builds/) RELEASE BUILD > ffmpeg-release-essentials.7z
+## Python launcher package
+FluidFrames.RIFE now installs as a lightweight launcher package. The launcher keeps the DirectML, ONNX, OpenCV, MoviePy, and GUI runtime dependencies in a managed Python 3.10 environment, separate from the Python environment where `pip install .` runs.
 
-Getting started.
-- Download the project on your PC (Green button Code > Download ZIP)
-- Extract the project from the .zip
-- Extract FFMPEG.exe in /Assets folder
-- Open the project with VSCode (Drag&Drop the project directory on VSCode)
-- Click on FluidFrames.py from left bar (VSCode will ask to install Python plugins)
-- Install dependencies. In VSCode there is the "Terminal" panel, click there and execute the command "pip install -r requirements.txt"
-- Close VSCode and re-open it (this will refresh all the dependecies installed)
-- Click on the "Play button" in the upper right corner of VSCode
+Install and launch from a checkout:
+
+```sh
+python -m pip install .
+fluidframes-rife
+```
+
+The installed commands are:
+
+```sh
+fluidframes-rife
+fluidframes
+```
+
+The first launch can take longer because the managed runtime is created and populated from `src/fluidframes_rife/requirements.runtime.lock.txt`. Later launches reuse the same runtime.
+
+Runtime controls:
+
+* `FLUIDFRAMES_RUNTIME_ENV` overrides the managed runtime directory.
+* `FLUIDFRAMES_LOG_DIR` overrides the launch log directory.
+* `FLUIDFRAMES_LAUNCH_TIMEOUT_SECONDS` limits the child GUI process lifetime for automation and tests.
+
+Without an override, the runtime is stored under the platform cache directory:
+
+* Windows: `%LOCALAPPDATA%\FluidFrames.RIFE\runtime-py310`
+* Linux/macOS: `$XDG_CACHE_HOME/FluidFrames.RIFE/runtime-py310` or `~/.cache/FluidFrames.RIFE/runtime-py310`
 
 ## Requirements. 🤓
 - [ ] Windows 11 / Windows 10
@@ -150,7 +164,6 @@ https://user-images.githubusercontent.com/32263112/228229016-8b26c8f3-8a68-4b5e-
 https://user-images.githubusercontent.com/32263112/228229044-9d267a66-543e-43ca-890b-db6a70c29d0b.mp4
 
 https://user-images.githubusercontent.com/32263112/228229083-d29a313f-3d28-4cdb-9d97-63410f28a608.mp4
-
 
 
 

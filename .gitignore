@@ -1,0 +1,19 @@
+# Bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Packaging/build artifacts
+build/
+*.egg-info/
+.pytest_cache/
+
+# Virtual/env artifacts
+.venv/
+venv/
+.env/
+
+# Editor / OS files
+.DS_Store
+Thumbs.db

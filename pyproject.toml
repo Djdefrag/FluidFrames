@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fluidframes-rife"
+description = "Video frame generation app powered by RIFE and DirectML"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["fluidframes", "rife", "frame-generation", "directml"]
+license = { text = "MIT" }
+classifiers = ["Programming Language :: Python :: 3"]
+dependencies = [
+    "filelock>=3.13.0",
+    "uv>=0.6.4",
+    "iso-env>=0.1.0",
+]
+version = "3.12.0"
+
+[project.scripts]
+fluidframes-rife = "fluidframes_rife.cli:main"
+fluidframes = "fluidframes_rife.cli:main"
+
+[tool.setuptools.package-data]
+fluidframes_rife = [
+    "requirements.runtime.lock.txt",
+    "Assets/*",
+    "AI-onnx/*",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 200
+
+[tool.isort]
+profile = "black"
+
+[tool.mypy]
+ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
