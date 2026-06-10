@@ -1,0 +1,27 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Build distribution
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m build
+      - name: Smoke test wheel install
+        run: |
+          python -m pip install --no-deps dist/*.whl
+          python -c "import fluidframes_rife; print(fluidframes_rife.__name__)"
+          python -c "from importlib.resources import files; assert files('fluidframes_rife').joinpath('requirements.runtime.lock.txt').read_text(encoding='utf-8').strip()"
