@@ -10,10 +10,10 @@ from typing import Any
 import pytest
 
 from fluidframes_rife import cli
-from fluidframes_rife._vendor.iso_env import Requirements
+from iso_env import Requirements
 
 
-def test_vendored_iso_env_accepts_runtime_python_version() -> None:
+def test_iso_env_accepts_runtime_python_version() -> None:
     requirements = Requirements("onnxruntime-directml", python_version="==3.10.*")
 
     assert requirements.content == "onnxruntime-directml"

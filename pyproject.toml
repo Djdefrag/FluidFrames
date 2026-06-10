@@ -13,6 +13,7 @@ classifiers = ["Programming Language :: Python :: 3"]
 dependencies = [
     "filelock>=3.13.0",
     "uv>=0.6.4",
+    "uv-iso-env>=1.0.44",
 ]
 version = "3.12.0"
 
@@ -26,7 +27,6 @@ fluidframes_rife = [
     "Assets/*",
     "AI-onnx/*",
 ]
-"fluidframes_rife._vendor.iso_env" = ["LICENSE", "assets/example.txt"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
