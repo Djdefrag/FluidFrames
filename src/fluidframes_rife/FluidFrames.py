@@ -142,6 +142,7 @@ OUTPUT_PATH_CODED    = "Same path as input files"
 DOCUMENT_PATH        = os_path_join(os_path_expanduser('~'), 'Documents')
 USER_PREFERENCE_PATH = find_by_relative_path(f"{DOCUMENT_PATH}{os_separator}{app_name}_UserPreference.json")
 FFMPEG_EXE_PATH      = find_by_relative_path(f"Assets{os_separator}ffmpeg.exe")
+DEFAULT_VIDEO_CRF    = 18
 EXIFTOOL_EXE_PATH    = find_by_relative_path(f"Assets{os_separator}exiftool.exe")
 
 
@@ -926,6 +927,7 @@ def video_encoding(
     no_audio_path = f"{os_path_splitext(video_output_path)[0]}_no_audio{os_path_splitext(video_output_path)[1]}"
     video_fps     = get_video_fps(video_path) if slowmotion else get_video_fps(video_path) * frame_gen_factor
     video_clip    = ImageSequenceClip.ImageSequenceClip(sequence = total_frames_paths, fps = video_fps)
+    crf_args      = [] if codec == "png" else ["-crf", str(DEFAULT_VIDEO_CRF)]
 
     if slowmotion:
         video_clip.write_videofile(
@@ -935,8 +937,8 @@ def video_encoding(
             threads  = cpu_number,
             logger   = None,
             audio    = None,
-            bitrate  = "12M",
-            preset   = "ultrafast"
+            preset   = "ultrafast",
+            ffmpeg_params = crf_args
         )
     else:
         video_clip.write_videofile(
@@ -946,8 +948,8 @@ def video_encoding(
             threads  = cpu_number,
             logger   = None,
             audio    = None,
-            bitrate  = "12M",
-            preset   = "ultrafast"
+            preset   = "ultrafast",
+            ffmpeg_params = crf_args
         )  
 
         # Copy the audio from original video
